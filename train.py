@@ -19,6 +19,8 @@ from model import MetaNetRNN, AttnDecoderRNN, DecoderRNN, describe_model, Wrappe
 from masked_cross_entropy import *
 import generate_episode as ge
 
+import sys
+
 # --
 # Main routine for training meta seq2seq models
 # --
@@ -211,7 +213,7 @@ def extract(include,arr):
     assert len(include)==len(arr)
     return [a for idx,a in enumerate(arr) if include[idx]]
 
-def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_lang, max_length, verbose=False):
+def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_lang, max_length, verbose=False, compnome=False):
     # Evaluate a list of episodes
     #
     # Input 
@@ -227,7 +229,7 @@ def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_la
     list_acc_val_novel = []
     list_acc_val_autoencoder = []
     for idx,sample in enumerate(sample_eval_list):
-        acc_val_novel, acc_val_autoencoder, yq_predict, in_support, all_attention_by_query, memory_attn_steps = evaluate(sample, encoder, decoder, input_lang, output_lang, max_length)
+        acc_val_novel, acc_val_autoencoder, yq_predict, in_support, all_attention_by_query, memory_attn_steps = evaluate(sample, encoder, decoder, input_lang, output_lang, max_length, compnome)
         list_acc_val_novel.append(acc_val_novel)
         list_acc_val_autoencoder.append(acc_val_autoencoder)
         if verbose:
@@ -244,7 +246,7 @@ def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_la
             display_input_output(extract(np.logical_not(in_support),sample['xq']),extract(np.logical_not(in_support),yq_predict),extract(np.logical_not(in_support),sample['yq']))
     return np.mean(list_acc_val_novel), np.mean(list_acc_val_autoencoder)
 
-def evaluate(sample, encoder, decoder, input_lang, output_lang, max_length):
+def evaluate(sample, encoder, decoder, input_lang, output_lang, max_length, compnome=False):
     # Evaluate an episode
     # 
     # Input
@@ -299,7 +301,11 @@ def evaluate(sample, encoder, decoder, input_lang, output_lang, max_length):
         all_decoder_outputs[:,t] = topi.numpy().flatten()
 
     # get predictions
-    in_support = np.array([x in sample['xs'] for x in sample['xq']])
+    if compnome:
+        support_symbols = [x[0] for x in sample['xs']]
+        in_support = np.array([all([s in support_symbols for s in x]) for x in sample['xq']])
+    else:
+        in_support = np.array([x in sample['xs'] for x in sample['xq']])
     yq_predict = []
     for q in range(nq):
         myseq = output_lang.symbolsFromVector(all_decoder_outputs[q,:])
@@ -418,9 +424,14 @@ def get_episode_generator(episode_type):
     input_lang = Lang(input_symbols_list_default)
     output_lang = Lang(output_symbols_list_default)
     if episode_type == 'ME': # NeurIPS Exp 1 : Mutual exclusivity
-        input_lang = Lang(input_symbols_list_default[:4])
-        output_lang = Lang(output_symbols_list_default[:4])
+        input_lang = Lang(input_symbols_list_default[:5])
+        output_lang = Lang(output_symbols_list_default[:5])
         generate_episode_train = lambda tabu_episodes : generate_ME(nquery=20,nprims=len(input_lang.symbols),input_lang=input_lang,output_lang=output_lang,tabu_list=tabu_episodes)
+        generate_episode_test = generate_episode_train
+    elif episode_type == 'CompNoME': 
+        input_lang = Lang(input_symbols_list_default[:5])
+        output_lang = Lang(output_symbols_list_default[:5])
+        generate_episode_train = lambda tabu_episodes : generate_CompNoME(nquery=20,nprims=len(input_lang.symbols),input_lang=input_lang,output_lang=output_lang,tabu_list=tabu_episodes)
         generate_episode_test = generate_episode_train
     elif episode_type == 'scan_prim_permutation': # NeurIPS Exp 2 : Adding a new primitive through permutation meta-training
         scan_all = ge.load_scan_file('all','train')
@@ -492,6 +503,41 @@ def generate_ME(nquery,nprims,input_lang,output_lang,maxlen=6,tabu_list=[]):
     while True:
         random.shuffle(input_symbols)
         random.shuffle(output_symbols)
+        D_str = '\n'.join([input_symbols[idx] + ' -> ' + output_symbols[idx] for idx in range(nprims)])   
+        identifier = make_hashable(D_str)        
+        D_support,D_query = ge.sample_ME_concat_data(nquery=nquery,input_symbols=input_symbols,output_symbols=output_symbols,maxlen=maxlen,inc_support_in_query=use_resconstruct_loss)
+        if identifier not in tabu_list:
+            break
+        count += 1
+        if count > max_try_novel:
+            raise Exception('We were unable to generate an episode that is not on the tabu list')        
+    x_support = [d[0].split(' ') for d in D_support]
+    y_support = [d[1].split(' ') for d in D_support]
+    x_query = [d[0].split(' ') for d in D_query]
+    y_query = [d[1].split(' ') for d in D_query]
+    return build_sample(x_support,y_support,x_query,y_query,input_lang,output_lang,identifier)
+
+def generate_CompNoME(nquery,nprims,input_lang,output_lang,maxlen=6,tabu_list=[]):
+    # Sample compositional episode without ME
+    #
+    # Input
+    #  nquery : number of query examples
+    #  nprims : number of unique primitives (support set includes all but one)
+    #  maxlen : maximum length of a sequence in the episode
+    #  ...
+    #  tabu_list : identifiers of episodes we should not produce
+    #
+
+    input_symbols = deepcopy(input_lang.symbols)
+    output_symbols = deepcopy(output_lang.symbols)
+    assert(nprims == len(input_symbols))
+    count = 0
+    while True:
+        input_symbols = deepcopy(input_lang.symbols)
+        output_symbols = deepcopy(output_lang.symbols)
+        random.shuffle(input_symbols)
+        random.shuffle(output_symbols)
+        output_symbols[-1] = output_symbols[-2]
         D_str = '\n'.join([input_symbols[idx] + ' -> ' + output_symbols[idx] for idx in range(nprims)])   
         identifier = make_hashable(D_str)        
         D_support,D_query = ge.sample_ME_concat_data(nquery=nquery,input_symbols=input_symbols,output_symbols=output_symbols,maxlen=maxlen,inc_support_in_query=use_resconstruct_loss)
@@ -631,7 +677,7 @@ def generate_length(shuffle,nsupport,nquery,input_lang,output_lang,scan_tuples_s
 if __name__ == "__main__":
 
     # Training parameters
-    num_episodes_val = 5 # number of episodes to use as validation throughout learning
+    num_episodes_val = 16 # number of episodes to use as validation throughout learning
     clip = 50.0 # clip gradients with larger magnitude than this
     max_try_novel = 100 # number of attempts to find a novel episode (not in tabu list) before throwing an error
     
@@ -716,6 +762,9 @@ if __name__ == "__main__":
         samples_val = []
         for i in range(num_episodes_val):
             sample = generate_episode_test(tabu_episodes)
+            # print(sample["identifier"])
+            # print(*zip(sample["xs"], sample["ys"]), sep="\n", end="\n\n")
+            # print(*zip(sample["xq"], sample["yq"]), sep="\n")
             samples_val.append(sample)
             tabu_episodes = tabu_update(tabu_episodes,sample['identifier'])
 
@@ -812,6 +861,6 @@ if __name__ == "__main__":
         print('Acc Retrieval (train): ' + str(round(acc_train_retrieval,1)))
         print('Acc Generalize (train): ' + str(round(acc_train_gen,1)))
 
-        acc_val_gen, acc_val_retrieval = evaluation_battery(samples_val, encoder, decoder, input_lang, output_lang, max_length_eval, verbose=True)
+        acc_val_gen, acc_val_retrieval = evaluation_battery(samples_val, encoder, decoder, input_lang, output_lang, max_length_eval, verbose=True, compnome=(episode_type == "CompNoME"))
         print('Acc Retrieval (val): ' + str(round(acc_val_retrieval,1)))
         print('Acc Generalize (val): ' + str(round(acc_val_gen,1)))
