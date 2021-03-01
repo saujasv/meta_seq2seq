@@ -47,6 +47,53 @@ def sample_ME_concat_data(nquery,input_symbols,output_symbols,maxlen,maxntry=500
 
 	return D_support, D_query
 
+def sample_bracket_data(nsupport,nquery,input_lang,minslen,maxslen,minqlen,maxqlen,maxntry=500,inc_support_in_query=False):
+	# Sample bracket episode based on current ordering of input/output symbols (already randomized)
+	# 
+	# Input
+	#  nquery : number of query examples
+	#  input_symbols : list of nprim input symbols (already permuted)
+	#  output_symbols : list of nprim output symbols (already permuted)
+	#  maxlen : maximum sequence length in query set
+	#  maxlen : maximum sequence length in query set
+	#  inc_support_in_query : true/false, where true indicates that we include the "support loss" in paper (default=False)
+
+	# support set with all singleton primitives
+	D_support = set([])
+	ntry = 0
+	while len(D_support)<nsupport:
+		mylen = random.randint(minslen // 2,maxslen // 2)
+		dat_list = [random.choice(input_lang.get_opens()) for _ in range(mylen)]
+		dat_out = dat_list + [input_lang.get_closing(b) for b in dat_list[::-1]]
+		dat_in = deepcopy(dat_out)
+		random.shuffle(dat_in)
+		dat_in = ' '.join(dat_in)
+		dat_out = ' '.join(dat_out)
+		D_support.add((dat_in,dat_out))
+		if ntry > maxntry:
+			raise Exception('Maximum number of tries to generate valid dataset')	
+	D_support = list(D_support)
+
+	# query set with random concatenations
+	D_query = set([])
+	ntry = 0
+	while len(D_query)<nquery:
+		mylen = random.randint(minqlen // 2,maxqlen // 2)
+		dat_list = [random.choice(input_lang.get_opens()) for _ in range(mylen)]
+		dat_out = dat_list + [input_lang.get_closing(b) for b in dat_list[::-1]]
+		dat_in = deepcopy(dat_out)
+		random.shuffle(dat_in)
+		dat_in = ' '.join(dat_in)
+		dat_out = ' '.join(dat_out)
+		D_query.add((dat_in,dat_out))
+		if ntry > maxntry:
+			raise Exception('Maximum number of tries to generate valid dataset')	
+	D_query = list(D_query)
+	if inc_support_in_query:
+		D_query += deepcopy(D_support)
+
+	return D_support, D_query
+
 def load_scan_file(mytype,split):
 	# Load SCAN dataset from file
 	#

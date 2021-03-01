@@ -19,7 +19,7 @@ from model import MetaNetRNN, AttnDecoderRNN, DecoderRNN, describe_model, Wrappe
 from masked_cross_entropy import *
 import generate_episode as ge
 
-import sys
+import pickle as pkl
 
 # --
 # Main routine for training meta seq2seq models
@@ -83,6 +83,25 @@ class Lang:
                 break
             mylist.append(s)
         return mylist
+
+class BracketLang(Lang):
+    pairs = {
+        '(': ')',
+        '[': ']',
+        '{': '}',
+        '<': '>'
+    }
+
+    def __init__(self, symbols):
+        super().__init__(symbols + [BracketLang.pairs[s] for s in symbols])
+        self.opens = symbols
+    
+    def get_closing(self, bracket):
+        return BracketLang.pairs[bracket]
+    
+    def get_opens(self):
+        return self.opens
+
 
 # Robertson's asMinutes and timeSince helper functions to print time elapsed and estimated time
 # remaining given the current time and progress
@@ -213,7 +232,7 @@ def extract(include,arr):
     assert len(include)==len(arr)
     return [a for idx,a in enumerate(arr) if include[idx]]
 
-def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_lang, max_length, verbose=False, compnome=False):
+def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_lang, max_length, verbose=False, compnome=False, attn_filename=None):
     # Evaluate a list of episodes
     #
     # Input 
@@ -230,6 +249,9 @@ def evaluation_battery(sample_eval_list, encoder, decoder, input_lang, output_la
     list_acc_val_autoencoder = []
     for idx,sample in enumerate(sample_eval_list):
         acc_val_novel, acc_val_autoencoder, yq_predict, in_support, all_attention_by_query, memory_attn_steps = evaluate(sample, encoder, decoder, input_lang, output_lang, max_length, compnome)
+        if attn_filename:
+            with open("{}_query_{}.pkl".format(attn_filename, idx), 'wb') as f:
+                pkl.dump({"attention": all_attention_by_query, "sample": sample, "pred": yq_predict, "mem_attention": memory_attn_steps}, f)
         list_acc_val_novel.append(acc_val_novel)
         list_acc_val_autoencoder.append(acc_val_autoencoder)
         if verbose:
@@ -433,6 +455,11 @@ def get_episode_generator(episode_type):
         output_lang = Lang(output_symbols_list_default[:5])
         generate_episode_train = lambda tabu_episodes : generate_CompNoME(nquery=20,nprims=len(input_lang.symbols),input_lang=input_lang,output_lang=output_lang,tabu_list=tabu_episodes)
         generate_episode_test = generate_episode_train
+    elif episode_type == 'bracket': 
+        input_lang = BracketLang(['(', '[', '{', '<'])
+        output_lang = BracketLang(['(', '[', '{', '<'])
+        generate_episode_train = lambda tabu_episodes : generate_bracket(nsupport=8,nquery=20,nprims=len(input_lang.symbols),input_lang=input_lang,output_lang=output_lang,minslen=2,maxslen=4,minqlen=4,maxqlen=8,tabu_list=tabu_episodes)
+        generate_episode_test = generate_episode_train
     elif episode_type == 'scan_prim_permutation': # NeurIPS Exp 2 : Adding a new primitive through permutation meta-training
         scan_all = ge.load_scan_file('all','train')
         scan_all_var = ge.load_scan_var('all','train')
@@ -484,6 +511,39 @@ def get_episode_generator(episode_type):
     else:
         raise Exception("episode_type is not valid" )
     return generate_episode_train, generate_episode_test, input_lang, output_lang
+
+def generate_bracket(nsupport,nquery,nprims,input_lang,output_lang,minslen=2,maxslen=6,minqlen=2,maxqlen=6,tabu_list=[]):
+    # Sample mutual exclusivity episode
+    #
+    # Input
+    #  nquery : number of query examples
+    #  nprims : number of unique primitives (support set includes all but one)
+    #  maxlen : maximum length of a sequence in the episode
+    #  ...
+    #  tabu_list : identifiers of episodes we should not produce
+    #
+
+    input_symbols = deepcopy(input_lang.symbols)
+    output_symbols = deepcopy(output_lang.symbols)     
+    assert(nprims == len(input_symbols))
+    count = 0
+    while True:
+        random.shuffle(input_symbols)
+        random.shuffle(output_symbols)
+        # D_str = '\n'.join([input_symbols[idx] + ' -> ' + output_symbols[idx] for idx in range(nprims)])   
+        # identifier = make_hashable(D_str)
+        D_support,D_query = ge.sample_bracket_data(nsupport=nsupport,nquery=nquery,input_lang=input_lang,minslen=minslen,maxslen=maxslen,minqlen=minqlen,maxqlen=maxqlen,inc_support_in_query=use_resconstruct_loss)
+        identifier = '\n'.join(["{}->{}".format(''.join(xs), ''.join(ys)) for xs, ys in D_support])
+        if identifier not in tabu_list:
+            break
+        count += 1
+        if count > max_try_novel:
+            raise Exception('We were unable to generate an episode that is not on the tabu list')        
+    x_support = [d[0].split(' ') for d in D_support]
+    y_support = [d[1].split(' ') for d in D_support]
+    x_query = [d[0].split(' ') for d in D_query]
+    y_query = [d[1].split(' ') for d in D_query]
+    return build_sample(x_support,y_support,x_query,y_query,input_lang,output_lang,identifier)
 
 def generate_ME(nquery,nprims,input_lang,output_lang,maxlen=6,tabu_list=[]):
     # Sample mutual exclusivity episode
@@ -677,7 +737,7 @@ def generate_length(shuffle,nsupport,nquery,input_lang,output_lang,scan_tuples_s
 if __name__ == "__main__":
 
     # Training parameters
-    num_episodes_val = 16 # number of episodes to use as validation throughout learning
+    num_episodes_val = 12 # number of episodes to use as validation throughout learning
     clip = 50.0 # clip gradients with larger magnitude than this
     max_try_novel = 100 # number of attempts to find a novel episode (not in tabu list) before throwing an error
     
@@ -762,9 +822,9 @@ if __name__ == "__main__":
         samples_val = []
         for i in range(num_episodes_val):
             sample = generate_episode_test(tabu_episodes)
-            # print(sample["identifier"])
-            # print(*zip(sample["xs"], sample["ys"]), sep="\n", end="\n\n")
-            # print(*zip(sample["xq"], sample["yq"]), sep="\n")
+            print(sample["identifier"])
+            print(*zip(sample["xs"], sample["ys"]), sep="\n", end="\n\n")
+            print(*zip(sample["xq"], sample["yq"]), sep="\n")
             samples_val.append(sample)
             tabu_episodes = tabu_update(tabu_episodes,sample['identifier'])
 
@@ -861,6 +921,6 @@ if __name__ == "__main__":
         print('Acc Retrieval (train): ' + str(round(acc_train_retrieval,1)))
         print('Acc Generalize (train): ' + str(round(acc_train_gen,1)))
 
-        acc_val_gen, acc_val_retrieval = evaluation_battery(samples_val, encoder, decoder, input_lang, output_lang, max_length_eval, verbose=True, compnome=(episode_type == "CompNoME"))
+        acc_val_gen, acc_val_retrieval = evaluation_battery(samples_val, encoder, decoder, input_lang, output_lang, max_length_eval, verbose=True, compnome=(episode_type == "CompNoME"), attn_filename="out_models/attns")
         print('Acc Retrieval (val): ' + str(round(acc_val_retrieval,1)))
         print('Acc Generalize (val): ' + str(round(acc_val_gen,1)))
